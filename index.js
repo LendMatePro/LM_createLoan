@@ -1,5 +1,8 @@
-import { TransactWriteItemsCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
-import { marshall } from "@aws-sdk/util-dynamodb";
+import {
+    GetItemCommand,
+    PutItemCommand
+} from "@aws-sdk/client-dynamodb";
+import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 import { ddbClient } from "./ddbClient.js";
 import kuuid from "kuuid";
 
@@ -18,20 +21,14 @@ export const handler = async (event) => {
 
         const {
             customerId,
-            dueDay,        // Integer between 1-28
+            dueDay,
             amount,
             rate,
+            interest,
             notes
         } = payload;
 
-        // Validate dueDay
-        if (!Number.isInteger(dueDay) || dueDay < 1 || dueDay > 28) {
-            return respond(400, {
-                message: "Whoa! 'dueDay' must be between 1 and 28. Time travel isn’t supported (yet)."
-            });
-        }
-
-        const result = await createLoan(customerId, dueDay, amount, rate, notes);
+        const result = await createLoan(customerId, dueDay, amount, rate, interest, notes);
 
         if (!result.status) {
             return respond(400, { message: result.message });
@@ -43,73 +40,72 @@ export const handler = async (event) => {
         });
     } catch (error) {
         console.error("Handler Error:", error);
-        return respond(400, error.message);
+        return respond(400, { message: error.message });
     }
 };
 
-async function createLoan(customerId, dueDay, amount, rate, notes) {
+async function createLoan(customerId, dueDay, amount, rate, interest, notes) {
     const returnValue = { status: false, message: null, loanId: null };
 
     try {
         const loanId = kuuid.id({ random: 4, millisecond: true });
         const createdAt = new Date().toISOString();
 
-        // Keys
-        const PK_loan = `LOAN#${dueDay}`;
-        const SK_loan = `CUSTOMER#${customerId}#LOAN#${loanId}`;
+        // Fetch customer
+        const getCustomerCommand = new GetItemCommand({
+            TableName: process.env.DYNAMODB_TABLE_NAME,
+            Key: marshall({
+                PK: "CUSTOMER",
+                SK: customerId
+            })
+        });
 
-        const loanInfo = {
-            amount,
-            rate,
-            createdAt,
+        const customerResult = await ddbClient.send(getCustomerCommand);
+
+        if (!customerResult.Item) {
+            returnValue.message = "Customer not found";
+            return returnValue;
+        }
+
+        const customer = unmarshall(customerResult.Item);
+        delete customer.PK;
+        delete customer.SK;
+
+        // Build and store loan record
+        const PK = `LOAN#${dueDay}`;
+        const SK = `CUSTOMER#${customerId}#LOAN#${loanId}`;
+
+        const loanRecord = {
+            PK,
+            SK,
+            loanId,
+            info: {
+                dueDay,
+                amount,
+                rate,
+                interest,
+                notes: notes || null
+            },
+            customer,
             status: "ACTIVE",
-            notes: notes || null
+            createdAt,
         };
 
-        const transaction = {
-            TransactItems: [
-                // Main loan record
-                {
-                    Put: {
-                        TableName: process.env.DYNAMODB_TABLE_NAME,
-                        Item: marshall({
-                            PK: PK_loan,
-                            SK: SK_loan,
-                            info: loanInfo
-                        }),
-                        ConditionExpression: "attribute_not_exists(PK)"
-                    }
-                },
-                // Update CUSTOMER_LOOKUP to include new loan
-                {
-                    Update: {
-                        TableName: process.env.DYNAMODB_TABLE_NAME,
-                        Key: marshall({
-                            PK: "CUSTOMER_LOOKUP",
-                            SK: customerId
-                        }),
-                        UpdateExpression: "SET loans = list_append(if_not_exists(loans, :empty), :newLoan) ",
-                        ExpressionAttributeValues: marshall({
-                            ":empty": [],
-                            ":newLoan": [
-                                { loanId, dueDay }
-                            ]
-                        })
-                    }
-                }
-            ]
-        };
+        const putCommand = new PutItemCommand({
+            TableName: process.env.DYNAMODB_TABLE_NAME,
+            Item: marshall(loanRecord),
+            ConditionExpression: "attribute_not_exists(PK)"
+        });
 
-        await ddbClient.send(new TransactWriteItemsCommand(transaction));
+        await ddbClient.send(putCommand);
 
         returnValue.status = true;
         returnValue.loanId = loanId;
         return returnValue;
+
     } catch (error) {
-        console.error("Transaction Error:", error);
-        returnValue.message = error.name === "TransactionCanceledException"
-            ? "Loan creation failed due to conflict or invalid customer"
-            : error.message;
+        console.error("PutItem Error:", error);
+        returnValue.message = error.message;
         return returnValue;
     }
 }
