@@ -71,24 +71,24 @@ async function createLoan(customerId, dueDay, amount, rate, interest, notes) {
         delete customer.PK;
         delete customer.SK;
 
-        // Build and store loan record
-        const PK = `LOAN#${dueDay}`;
+        // Updated Keys and data structure
+        const PK = "LOAN";
         const SK = `CUSTOMER#${customerId}#LOAN#${loanId}`;
 
         const loanRecord = {
             PK,
             SK,
-            loanId,
+            createdAt,
+            status: "ACTIVE",
+            customer,
             info: {
+                loanId,
                 dueDay,
                 amount,
                 rate,
                 interest,
                 notes: notes || null
-            },
-            customer,
-            status: "ACTIVE",
-            createdAt,
+            }
         };
 
         const putCommand = new PutItemCommand({
