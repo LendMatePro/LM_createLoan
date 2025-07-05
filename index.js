@@ -6,6 +6,8 @@ import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 import { ddbClient } from "./ddbClient.js";
 import kuuid from "kuuid";
 
+const TABLE_NAME = process.env.DYNAMODB_TABLE_NAME;
+
 export const handler = async (event) => {
     const respond = (statusCode, message) => ({
         statusCode,
@@ -40,7 +42,7 @@ export const handler = async (event) => {
         });
     } catch (error) {
         console.error("Handler Error:", error);
-        return respond(400, { message: error.message });
+        return respond(500, { message: "Failed to create loan", error: error.message });
     }
 };
 
@@ -51,9 +53,8 @@ async function createLoan(customerId, dueDay, amount, rate, interest, notes) {
         const loanId = kuuid.id({ random: 4, millisecond: true });
         const createdAt = new Date().toISOString();
 
-        // Fetch customer
         const getCustomerCommand = new GetItemCommand({
-            TableName: process.env.DYNAMODB_TABLE_NAME,
+            TableName: TABLE_NAME,
             Key: marshall({
                 PK: "CUSTOMER",
                 SK: customerId
@@ -71,30 +72,28 @@ async function createLoan(customerId, dueDay, amount, rate, interest, notes) {
         delete customer.PK;
         delete customer.SK;
 
-        // Updated Keys and data structure
         const PK = "LOAN";
         const SK = `CUSTOMER#${customerId}#LOAN#${loanId}`;
 
         const loanRecord = {
             PK,
             SK,
+            loanId,
+            customerId,
+            dueDay,
+            amount,
+            rate,
+            interest,
+            notes: notes || null,
             createdAt,
             status: "ACTIVE",
-            customer,
-            info: {
-                loanId,
-                dueDay,
-                amount,
-                rate,
-                interest,
-                notes: notes || null
-            }
+            customer
         };
 
         const putCommand = new PutItemCommand({
-            TableName: process.env.DYNAMODB_TABLE_NAME,
+            TableName: TABLE_NAME,
             Item: marshall(loanRecord),
-            ConditionExpression: "attribute_not_exists(PK)"
+            ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)"
         });
 
         await ddbClient.send(putCommand);
